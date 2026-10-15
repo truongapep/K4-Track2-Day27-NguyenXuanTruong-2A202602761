@@ -54,15 +54,56 @@ def check_contract_checkpoint(payload, ctx):
 
 
 def check_lineage_run(payload, ctx):
-    # TODO: ctx.tools.lineage_graph_slice(payload["run_id"])
-    return Verdict(alert=False, pillar="lineage")
+    if ctx.tools.budget_remaining() < 1.0:
+        return Verdict(alert=False, pillar="lineage", reason="Insufficient budget for lineage slice")
+
+    graph = ctx.tools.lineage_graph_slice(payload["run_id"])
+    if "error" in graph:
+        return Verdict(alert=False, pillar="lineage", reason="Lineage slice unavailable")
+
+    reasons = []
+    if graph["duration_ms"] > ctx.baseline["lineage_duration_ms_max"]:
+        reasons.append("lineage runtime above baseline")
+    # Use declared expectations when present; do not invent an expected graph.
+    if "expected_upstream" in payload:
+        if set(payload["expected_upstream"]) - set(graph["actual_upstream"]):
+            reasons.append("missing expected upstream dependencies")
+    elif not graph["actual_upstream"]:
+        reasons.append("no upstream dependencies")
+    if "expected_downstream_count" in payload:
+        if graph["actual_downstream_count"] != payload["expected_downstream_count"]:
+            reasons.append("downstream count differs from expectation")
+    elif graph["actual_downstream_count"] <= 0:
+        reasons.append("no downstream outputs")
+
+    return Verdict(alert=bool(reasons), pillar="lineage", reason="; ".join(reasons))
 
 
 def check_feature_materialization(payload, ctx):
-    # TODO: ctx.tools.feature_drift(payload["feature_view"], payload["batch_id"])
-    return Verdict(alert=False, pillar="ai_infra")
+    if ctx.tools.budget_remaining() < 2.0:
+        return Verdict(alert=False, pillar="ai_infra", reason="Insufficient budget for feature drift")
+
+    drift = ctx.tools.feature_drift(payload["feature_view"], payload["batch_id"])
+    if "error" in drift:
+        return Verdict(alert=False, pillar="ai_infra", reason="Feature drift unavailable")
+
+    alert = drift["mean_shift_sigma"] > ctx.baseline["feature_mean_shift_sigma_max"]
+    return Verdict(alert=alert, pillar="ai_infra",
+                   reason="training-serving feature skew above baseline" if alert else "")
 
 
 def check_embedding_batch(payload, ctx):
-    # TODO: ctx.tools.embedding_drift(payload["corpus"], payload["chunk_batch_id"])
-    return Verdict(alert=False, pillar="ai_infra")
+    if ctx.tools.budget_remaining() < 2.0:
+        return Verdict(alert=False, pillar="ai_infra", reason="Insufficient budget for embedding drift")
+
+    drift = ctx.tools.embedding_drift(payload["corpus"], payload["chunk_batch_id"])
+    if "error" in drift:
+        return Verdict(alert=False, pillar="ai_infra", reason="Embedding drift unavailable")
+
+    reasons = []
+    if drift["centroid_shift"] > ctx.baseline["embedding_centroid_shift_max"]:
+        reasons.append("embedding centroid shift above baseline")
+    if drift["avg_doc_age_days"] > ctx.baseline["corpus_avg_doc_age_days_max"]:
+        reasons.append("corpus documents are stale")
+
+    return Verdict(alert=bool(reasons), pillar="ai_infra", reason="; ".join(reasons))
