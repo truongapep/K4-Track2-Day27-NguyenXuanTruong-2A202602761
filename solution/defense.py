@@ -65,11 +65,23 @@ def check_lineage_run(payload, ctx):
     if graph["duration_ms"] > ctx.baseline["lineage_duration_ms_max"]:
         reasons.append("lineage runtime above baseline")
     # Use declared expectations when present; do not invent an expected graph.
-    if "expected_upstream" in payload:
-        if set(payload["expected_upstream"]) - set(graph["actual_upstream"]):
+    expected_upstream = payload.get("expected_upstream")
+    if expected_upstream is not None:
+        if set(expected_upstream) - set(graph["actual_upstream"]):
             reasons.append("missing expected upstream dependencies")
     elif not graph["actual_upstream"]:
         reasons.append("no upstream dependencies")
+    else:
+        # Partition by event metadata, excluding the unique run identifier.
+        # Require repeated observations before treating a topology as evidence.
+        group = tuple(sorted((key, repr(value)) for key, value in payload.items()
+                             if key != "run_id"))
+        history = ctx.state.setdefault("lineage_topologies", {}).setdefault(group, {})
+        upstream = frozenset(graph["actual_upstream"])
+        if any(count >= 3 and upstream < previous
+               for previous, count in history.items()):
+            reasons.append("upstream dependencies missing from repeated topology")
+        history[upstream] = history.get(upstream, 0) + 1
     if "expected_downstream_count" in payload:
         if graph["actual_downstream_count"] != payload["expected_downstream_count"]:
             reasons.append("downstream count differs from expectation")
